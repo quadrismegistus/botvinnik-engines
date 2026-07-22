@@ -12,8 +12,8 @@ on:
       engine:
         description: Which engine(s) to build
         type: choice
-        options: [both, patricia, clockwork]
-        default: both
+        options: [patricia, clockwork, rodent]
+        default: patricia
       patricia_ref:
         description: "Patricia git ref/tag (e.g. 5)"
         type: string
@@ -22,6 +22,10 @@ on:
         description: "Clockwork git ref/branch (no releases yet; use main)"
         type: string
         default: "main"
+      rodent_ref:
+        description: "Rodent IV git ref (no releases; use HEAD)"
+        type: string
+        default: "HEAD"
 
 # Least privilege: build jobs only read public engine repos; the publish job
 # raises itself to contents:write to cut the releases.
@@ -45,6 +49,8 @@ jobs:
       patricia_version: ${{ steps.v.outputs.patricia_version }}
       clockwork_sha: ${{ steps.v.outputs.clockwork_sha }}
       clockwork_version: ${{ steps.v.outputs.clockwork_version }}
+      rodent_sha: ${{ steps.v.outputs.rodent_sha }}
+      rodent_version: ${{ steps.v.outputs.rodent_version }}
     steps:
       - id: v
         name: Resolve refs to commits + version labels
@@ -53,19 +59,26 @@ jobs:
           SEL: ${{ inputs.engine }}
           PREF: ${{ inputs.patricia_ref }}
           CREF: ${{ inputs.clockwork_ref }}
+          RREF: ${{ inputs.rodent_ref }}
         run: |
           set -euo pipefail
-          if [ "$SEL" = patricia ] || [ "$SEL" = both ]; then
+          if [ "$SEL" = patricia ]; then
             psha=$(gh api "repos/Adam-Kulju/Patricia/commits/$PREF" --jq '.sha')
             echo "patricia_sha=$psha" >> "$GITHUB_OUTPUT"
             # Patricia releases are versioned by tag (e.g. "5").
             echo "patricia_version=$PREF" >> "$GITHUB_OUTPUT"
           fi
-          if [ "$SEL" = clockwork ] || [ "$SEL" = both ]; then
+          if [ "$SEL" = clockwork ]; then
             csha=$(gh api "repos/official-clockwork/Clockwork/commits/$CREF" --jq '.sha')
             echo "clockwork_sha=$csha" >> "$GITHUB_OUTPUT"
             # No semver releases yet; tag by short commit.
             echo "clockwork_version=0.1-g${csha:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$SEL" = rodent ]; then
+            rsha=$(gh api "repos/nescitus/rodent-iv/commits/$RREF" --jq '.sha')
+            echo "rodent_sha=$rsha" >> "$GITHUB_OUTPUT"
+            # id string is "Rodent IV 0.33"; no releases, so tag by short commit.
+            echo "rodent_version=iv-0.33-g${rsha:0:12}" >> "$GITHUB_OUTPUT"
           fi
 
       - id: mat
@@ -86,14 +99,11 @@ jobs:
           # installer changes. Re-add its row once that is solved.
           cat > /tmp/all.json <<'JSON'
           [
-            {"engine":"patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"}
+            {"engine":"patricia","repo":"Adam-Kulju/Patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
+            {"engine":"rodent","repo":"nescitus/rodent-iv","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"}
           ]
           JSON
-          if [ "$SEL" = both ]; then
-            m=$(jq -c '{include: .}' /tmp/all.json)
-          else
-            m=$(jq -c --arg e "$SEL" '{include: [ .[] | select(.engine==$e) ]}' /tmp/all.json)
-          fi
+          m=$(jq -c --arg e "$SEL" '{include: [ .[] | select(.engine==$e) ]}' /tmp/all.json)
           echo "matrix=$m" >> "$GITHUB_OUTPUT"
 
   # ---------------------------------------------------------------------------
@@ -109,8 +119,8 @@ jobs:
       - name: Checkout engine source (the ENGINE repo, not this one)
         uses: actions/checkout@v4
         with:
-          repository: ${{ matrix.engine == 'patricia' && 'Adam-Kulju/Patricia' || 'official-clockwork/Clockwork' }}
-          ref: ${{ matrix.engine == 'patricia' && needs.resolve.outputs.patricia_sha || needs.resolve.outputs.clockwork_sha }}
+          repository: ${{ matrix.repo }}
+          ref: ${{ (matrix.engine == 'patricia' && needs.resolve.outputs.patricia_sha) || (matrix.engine == 'rodent' && needs.resolve.outputs.rodent_sha) || needs.resolve.outputs.clockwork_sha }}
           # Full history: Clockwork derives a version string from git, and a
           # bare SHA checkout needs the objects present.
           fetch-depth: 0
@@ -127,6 +137,18 @@ jobs:
           # so the net is inside the binary — no external file to ship.
           make build
           echo "BIN=$PWD/patricia" >> "$GITHUB_ENV"
+
+      - name: Build Rodent IV (plain g++, arm64-clean)
+        if: matrix.engine == 'rodent'
+        working-directory: engine-src/sources
+        run: |
+          set -euo pipefail
+          # `make build` is g++ -O3 -std=c++14 src/*.cpp with NO -march/SSE
+          # flags, so it compiles native arm64 (its popcount has a portable
+          # fallback). Output goes to ../mac/rodentIV; create that dir first.
+          mkdir -p ../mac
+          make build
+          echo "BIN=$PWD/../mac/rodentIV" >> "$GITHUB_ENV"
 
       - name: Build Clockwork (HCE, no external net)
         if: matrix.engine == 'clockwork'
@@ -247,10 +269,11 @@ jobs:
           GH_REPO: ${{ github.repository }}
           PVER: ${{ needs.resolve.outputs.patricia_version }}
           CVER: ${{ needs.resolve.outputs.clockwork_version }}
+          RVER: ${{ needs.resolve.outputs.rodent_version }}
         run: |
           set -euo pipefail
           shopt -s nullglob
-          for engine in patricia clockwork; do
+          for engine in patricia clockwork rodent; do
             assets=(); metas=()
             for d in dl/engine-${engine}-*; do
               for f in "$d"/*; do
@@ -264,6 +287,8 @@ jobs:
 
             if [ "$engine" = patricia ]; then
               ver="$PVER"; src="https://github.com/Adam-Kulju/Patricia";        lic="MIT"
+            elif [ "$engine" = rodent ]; then
+              ver="$RVER"; src="https://github.com/nescitus/rodent-iv";         lic="GPL-3.0"
             else
               ver="$CVER"; src="https://github.com/official-clockwork/Clockwork"; lic="AGPL-3.0"
             fi
