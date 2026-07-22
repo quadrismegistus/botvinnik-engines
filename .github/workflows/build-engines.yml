@@ -1,0 +1,273 @@
+name: Build engines
+
+# Compile UCI engines that ship no macOS binary, ad-hoc sign them for Apple
+# Silicon, and publish the signed binaries as releases in THIS repo so
+# botvinnik's download catalog can pin them by SHA-256. Runs in-repo, so the
+# default GITHUB_TOKEN publishes the releases — no cross-repo PAT needed.
+# Structured so adding a Linux/Windows job later is a one-row matrix change.
+
+on:
+  workflow_dispatch:
+    inputs:
+      engine:
+        description: Which engine(s) to build
+        type: choice
+        options: [both, patricia, clockwork]
+        default: both
+      patricia_ref:
+        description: "Patricia git ref/tag (e.g. 5)"
+        type: string
+        default: "5"
+      clockwork_ref:
+        description: "Clockwork git ref/branch (no releases yet; use main)"
+        type: string
+        default: "main"
+
+# Least privilege: build jobs only read public engine repos; the publish job
+# raises itself to contents:write to cut the releases.
+permissions:
+  contents: read
+
+concurrency:
+  group: build-engines-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  # ---------------------------------------------------------------------------
+  # Resolve each requested ref to ONE concrete commit (so the arm64 and x64 legs
+  # build identical source and share a tag) and emit the build matrix.
+  # ---------------------------------------------------------------------------
+  resolve:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.mat.outputs.matrix }}
+      patricia_sha: ${{ steps.v.outputs.patricia_sha }}
+      patricia_version: ${{ steps.v.outputs.patricia_version }}
+      clockwork_sha: ${{ steps.v.outputs.clockwork_sha }}
+      clockwork_version: ${{ steps.v.outputs.clockwork_version }}
+    steps:
+      - id: v
+        name: Resolve refs to commits + version labels
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SEL: ${{ inputs.engine }}
+          PREF: ${{ inputs.patricia_ref }}
+          CREF: ${{ inputs.clockwork_ref }}
+        run: |
+          set -euo pipefail
+          if [ "$SEL" = patricia ] || [ "$SEL" = both ]; then
+            psha=$(gh api "repos/Adam-Kulju/Patricia/commits/$PREF" --jq '.sha')
+            echo "patricia_sha=$psha" >> "$GITHUB_OUTPUT"
+            # Patricia releases are versioned by tag (e.g. "5").
+            echo "patricia_version=$PREF" >> "$GITHUB_OUTPUT"
+          fi
+          if [ "$SEL" = clockwork ] || [ "$SEL" = both ]; then
+            csha=$(gh api "repos/official-clockwork/Clockwork/commits/$CREF" --jq '.sha')
+            echo "clockwork_sha=$csha" >> "$GITHUB_OUTPUT"
+            # No semver releases yet; tag by short commit.
+            echo "clockwork_version=0.1-g${csha:0:12}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - id: mat
+        name: Build the matrix for the selected engine(s)
+        env:
+          SEL: ${{ inputs.engine }}
+        run: |
+          set -euo pipefail
+          # One place to extend: add a Linux/Windows row here and it just works.
+          cat > /tmp/all.json <<'JSON'
+          [
+            {"engine":"patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
+            {"engine":"patricia","os":"macos-13","arch":"x64","platform_key":"macos-x64"},
+            {"engine":"clockwork","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
+            {"engine":"clockwork","os":"macos-13","arch":"x64","platform_key":"macos-x64"}
+          ]
+          JSON
+          if [ "$SEL" = both ]; then
+            m=$(jq -c '{include: .}' /tmp/all.json)
+          else
+            m=$(jq -c --arg e "$SEL" '{include: [ .[] | select(.engine==$e) ]}' /tmp/all.json)
+          fi
+          echo "matrix=$m" >> "$GITHUB_OUTPUT"
+
+  # ---------------------------------------------------------------------------
+  # Compile + ad-hoc sign one engine for one macOS arch.
+  # ---------------------------------------------------------------------------
+  build:
+    needs: resolve
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJson(needs.resolve.outputs.matrix) }}
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout engine source (the ENGINE repo, not this one)
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ matrix.engine == 'patricia' && 'Adam-Kulju/Patricia' || 'official-clockwork/Clockwork' }}
+          ref: ${{ matrix.engine == 'patricia' && needs.resolve.outputs.patricia_sha || needs.resolve.outputs.clockwork_sha }}
+          # Full history: Clockwork derives a version string from git, and a
+          # bare SHA checkout needs the objects present.
+          fetch-depth: 0
+          path: engine-src
+
+      - name: Build Patricia (embeds NNUE via incbin -> single file)
+        if: matrix.engine == 'patricia'
+        working-directory: engine-src/engine
+        run: |
+          set -euo pipefail
+          # Documented native build. NOT `make aarch64`: it passes
+          # -static-libstdc++/-static-libgcc, which Apple clang rejects. `make
+          # build` is clang++ -O3 -march=native and INCBINs nets/fingolfin.nnue,
+          # so the net is inside the binary — no external file to ship.
+          make build
+          echo "BIN=$PWD/patricia" >> "$GITHUB_ENV"
+
+      - name: Build Clockwork (HCE, no external net)
+        if: matrix.engine == 'clockwork'
+        working-directory: engine-src
+        run: |
+          set -euo pipefail
+          # Clockwork needs clang >= 17; Apple clang lags, so use Homebrew LLVM.
+          brew install llvm >/dev/null || true
+          LLVM="$(brew --prefix llvm)"
+          export SDKROOT="$(xcrun --show-sdk-path)"
+          # CMakeLists.txt HARDCODES CMAKE_OSX_ARCHITECTURES=x86_64, so a plain
+          # `make` on the arm64 runner would cross-emit an Intel binary. Override
+          # it, and clone the vendored `lps` dep over the net during configure.
+          cmake -S . -B build-release \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
+            -DCLOCKWORK_MARCH_TARGET=native \
+            -DCMAKE_OSX_ARCHITECTURES=${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }} \
+            -DCMAKE_OSX_SYSROOT="$SDKROOT"
+          cmake --build build-release -j
+          echo "BIN=$PWD/build-release/clockwork" >> "$GITHUB_ENV"
+
+      - name: Stage canonical asset name
+        env:
+          VER: ${{ matrix.engine == 'patricia' && needs.resolve.outputs.patricia_version || needs.resolve.outputs.clockwork_version }}
+        run: |
+          set -euo pipefail
+          asset="${{ matrix.engine }}-${VER}-${{ matrix.platform_key }}"
+          mkdir -p out
+          cp "$BIN" "out/$asset"
+          chmod +x "out/$asset"
+          echo "ASSET=$asset" >> "$GITHUB_ENV"
+          echo "TAG=${{ matrix.engine }}-${VER}" >> "$GITHUB_ENV"
+
+      - name: Verify arch + single Mach-O (catches the OSX_ARCHITECTURES trap)
+        run: |
+          set -euo pipefail
+          file "out/$ASSET"
+          got=$(lipo -archs "out/$ASSET" | tr -d '[:space:]')
+          want=${{ matrix.arch == 'arm64' && 'arm64' || 'x86_64' }}
+          [ "$got" = "$want" ] || { echo "::error::arch mismatch: built '$got' expected '$want'"; exit 1; }
+
+      - name: Ad-hoc sign (Apple Silicon refuses unsigned arm64 binaries)
+        run: |
+          set -euo pipefail
+          codesign --force --sign - "out/$ASSET"
+          codesign -dvv "out/$ASSET" 2>&1 | grep -qi 'Signature=adhoc'
+
+      - name: Smoke test the SIGNED binary (proves self-contained)
+        run: |
+          set -euo pipefail
+          # A real search forces evaluation: an NNUE engine missing its net
+          # could not return a bestmove. Also confirms signing didn't break it.
+          o=$(printf 'uci\nisready\nposition startpos\ngo depth 8\nquit\n' | "./out/$ASSET")
+          echo "$o" | grep -q 'uciok'
+          echo "$o" | grep -q 'bestmove'
+
+      - name: Checksums -> Step Summary + metadata (of the signed asset)
+        run: |
+          set -euo pipefail
+          f="out/$ASSET"
+          sha=$(shasum -a 256 "$f" | awk '{print $1}')
+          size=$(stat -f%z "$f")
+          {
+            echo "### \`$ASSET\`"
+            echo ""
+            echo "| field | value |"
+            echo "| --- | --- |"
+            echo "| platform key | \`${{ matrix.platform_key }}\` |"
+            echo "| url | \`https://github.com/${{ github.repository }}/releases/download/${TAG}/${ASSET}\` |"
+            echo "| sha256 | \`$sha\` |"
+            echo "| sizeBytes | \`$size\` |"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Machine-readable line the publish job folds into the release body.
+          printf '%s\t%s\t%s\t%s\n' "${{ matrix.engine }}" "${{ matrix.platform_key }}" "$sha" "$size" > "$f.meta"
+
+      - name: Upload build outputs
+        uses: actions/upload-artifact@v4
+        with:
+          name: engine-${{ matrix.engine }}-${{ matrix.arch }}
+          path: |
+            out/${{ env.ASSET }}
+            out/${{ env.ASSET }}.meta
+          if-no-files-found: error
+
+  # ---------------------------------------------------------------------------
+  # Aggregate the arm64 + x64 assets per engine into one release in THIS repo,
+  # with every hash in the release body.
+  # ---------------------------------------------------------------------------
+  publish:
+    needs: [resolve, build]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Download all build outputs
+        uses: actions/download-artifact@v4
+        with:
+          path: dl
+
+      - name: Publish per-engine releases to this repo
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          PVER: ${{ needs.resolve.outputs.patricia_version }}
+          CVER: ${{ needs.resolve.outputs.clockwork_version }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          for engine in patricia clockwork; do
+            assets=(); metas=()
+            for d in dl/engine-${engine}-*; do
+              for f in "$d"/*; do
+                case "$f" in
+                  *.meta) metas+=("$f");;
+                  *)      assets+=("$f");;
+                esac
+              done
+            done
+            [ ${#assets[@]} -gt 0 ] || continue
+
+            if [ "$engine" = patricia ]; then
+              ver="$PVER"; src="https://github.com/Adam-Kulju/Patricia";        lic="MIT"
+            else
+              ver="$CVER"; src="https://github.com/official-clockwork/Clockwork"; lic="AGPL-3.0"
+            fi
+            tag="${engine}-${ver}"
+
+            {
+              echo "Ad-hoc-signed macOS builds of **${engine} ${ver}**, compiled by CI."
+              echo ""
+              echo "Source: ${src} (licence ${lic}). We host these binaries only because"
+              echo "upstream ships no macOS build; the source of truth stays the repo above."
+              echo ""
+              echo "| asset | platform key | sha256 | sizeBytes |"
+              echo "| --- | --- | --- | --- |"
+              for m in "${metas[@]}"; do
+                IFS=$'\t' read -r e pk sha size < "$m"
+                echo "| \`$(basename "$m" .meta)\` | \`$pk\` | \`$sha\` | $size |"
+              done
+            } > body.md
+
+            if gh release view "$tag" >/dev/null 2>&1; then
+              gh release edit   "$tag" --notes-file body.md
+            else
+              gh release create "$tag" --title "$tag" --notes-file body.md
+            fi
+            gh release upload "$tag" --clobber "${assets[@]}"
+          done
