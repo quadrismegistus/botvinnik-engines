@@ -74,13 +74,13 @@ jobs:
           SEL: ${{ inputs.engine }}
         run: |
           set -euo pipefail
-          # One place to extend: add a Linux/Windows row here and it just works.
+          # Apple Silicon only for now: the macos-13 (Intel) runners are heavily
+          # congested and Apple Silicon is the overwhelming majority. Add a
+          # macos-13/x64 or a Linux row here to extend — the rest just works.
           cat > /tmp/all.json <<'JSON'
           [
             {"engine":"patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
-            {"engine":"patricia","os":"macos-13","arch":"x64","platform_key":"macos-x64"},
-            {"engine":"clockwork","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
-            {"engine":"clockwork","os":"macos-13","arch":"x64","platform_key":"macos-x64"}
+            {"engine":"clockwork","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"}
           ]
           JSON
           if [ "$SEL" = both ]; then
@@ -131,9 +131,14 @@ jobs:
           brew install llvm >/dev/null || true
           LLVM="$(brew --prefix llvm)"
           export SDKROOT="$(xcrun --show-sdk-path)"
-          # CMakeLists.txt HARDCODES CMAKE_OSX_ARCHITECTURES=x86_64, so a plain
-          # `make` on the arm64 runner would cross-emit an Intel binary. Override
-          # it, and clone the vendored `lps` dep over the net during configure.
+          # CMakeLists.txt HARDCODES `set(CMAKE_OSX_ARCHITECTURES "x86_64")`,
+          # which beats the -D cache var (a set() wins), so a plain build
+          # cross-emits an Intel binary on the arm64 runner. Strip that line so
+          # our arch flag below actually takes effect.
+          grep -rl CMAKE_OSX_ARCHITECTURES --include=CMakeLists.txt . \
+            | xargs -I{} sed -i '' '/CMAKE_OSX_ARCHITECTURES/d' {}
+          # cmake (not the Makefile, which won't forward -D) also clones the
+          # vendored `lps` dep over the net during configure.
           cmake -S . -B build-release \
             -DCMAKE_BUILD_TYPE=Release \
             -DCMAKE_CXX_COMPILER="$LLVM/bin/clang++" \
@@ -174,7 +179,12 @@ jobs:
           set -euo pipefail
           # A real search forces evaluation: an NNUE engine missing its net
           # could not return a bestmove. Also confirms signing didn't break it.
-          o=$(printf 'uci\nisready\nposition startpos\ngo depth 8\nquit\n' | "./out/$ASSET")
+          # Send `quit` only AFTER a movetime search has had time to print its
+          # bestmove — piping `quit` straight after `go` races the engine into
+          # exiting first (this is what failed Patricia's arm64 leg). `|| true`
+          # because some engines exit non-zero on quit; the greps are the gate.
+          o=$( { printf 'uci\nisready\nposition startpos\ngo movetime 800\n'; \
+                 sleep 3; printf 'quit\n'; } | "./out/$ASSET" || true )
           echo "$o" | grep -q 'uciok'
           echo "$o" | grep -q 'bestmove'
 
