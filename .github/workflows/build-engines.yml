@@ -77,10 +77,16 @@ jobs:
           # Apple Silicon only for now: the macos-13 (Intel) runners are heavily
           # congested and Apple Silicon is the overwhelming majority. Add a
           # macos-13/x64 or a Linux row here to extend — the rest just works.
+          #
+          # Clockwork is deferred: its source uses x86 SSE intrinsics
+          # (__builtin_ia32_* via mmintrin.h), so it only compiles for x86_64 —
+          # which is why upstream hardcodes CMAKE_OSX_ARCHITECTURES=x86_64 (build
+          # Intel, run under Rosetta). A native arm64 build needs SIMDe or a
+          # scalar fallback; shipping it would mean an x86_64/Rosetta path and
+          # installer changes. Re-add its row once that is solved.
           cat > /tmp/all.json <<'JSON'
           [
-            {"engine":"patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"},
-            {"engine":"clockwork","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"}
+            {"engine":"patricia","os":"macos-14","arch":"arm64","platform_key":"macos-arm64"}
           ]
           JSON
           if [ "$SEL" = both ]; then
@@ -223,6 +229,9 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     needs: [resolve, build]
+    # Run even if a build leg failed, so a working engine still ships; the loop
+    # below simply skips any engine that produced no artifact.
+    if: ${{ !cancelled() }}
     runs-on: ubuntu-latest
     permissions:
       contents: write
