@@ -178,7 +178,7 @@ jobs:
 
       - name: Stage canonical asset name
         env:
-          VER: ${{ matrix.engine == 'patricia' && needs.resolve.outputs.patricia_version || needs.resolve.outputs.clockwork_version }}
+          VER: ${{ (matrix.engine == 'patricia' && needs.resolve.outputs.patricia_version) || (matrix.engine == 'rodent' && needs.resolve.outputs.rodent_version) || needs.resolve.outputs.clockwork_version }}
         run: |
           set -euo pipefail
           asset="${{ matrix.engine }}-${VER}-${{ matrix.platform_key }}"
