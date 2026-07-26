@@ -21,6 +21,26 @@ The upstream repositories are the source of truth. For the AGPL-3.0 engine the
 corresponding source is the linked repository (§13); we redistribute only the
 compiled binary and always link back to it.
 
+## Model weights hosted here
+
+Not everything here is a compiled binary. One release is a neural network:
+
+| model | upstream | licence |
+| --- | --- | --- |
+| Chess-GPT (8-layer, Lichess) | https://huggingface.co/adamkarvonen/chess_llms | MIT |
+
+`chessgpt-lichess-8layers-int8.onnx` is Adam Karvonen's Chess-GPT checkpoint
+exported to ONNX and int8-quantised (~26 MB, down from ~103 MB) so it runs on a
+phone through onnxruntime. It is a format change, not a retrain: the model is
+the same one described in [arXiv:2403.15498](https://arxiv.org/abs/2403.15498),
+a character-level transformer over PGN movetext that plays chess with no search
+of any kind. Attribution and the licence reconstruction are in
+[LICENSE-chessgpt](LICENSE-chessgpt).
+
+Same rules as the binaries: the upstream repository is the source of truth, and
+botvinnik's catalog pins the SHA-256 and refuses any download that does not
+match.
+
 ## How a build happens
 
 Actions → **Build engines** → Run workflow. It compiles each engine for

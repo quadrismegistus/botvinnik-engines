@@ -1,0 +1,46 @@
+Chess-GPT model weights
+=======================
+
+The file published in this repository as `chessgpt-lichess-8layers-int8.onnx`
+is a DERIVATIVE of Adam Karvonen's Chess-GPT checkpoint
+`lichess_8layers_ckpt_no_optimizer.pt`:
+
+  weights: https://huggingface.co/adamkarvonen/chess_llms
+  code:    https://github.com/adamkarvonen/chess_llm_interpretability
+  paper:   Karvonen, "Emergent World Models and Latent Variable Estimation
+           in Chess-Playing Language Models", arXiv:2403.15498
+
+Both upstream repositories declare the MIT licence. The derivation is an ONNX
+export followed by int8 dynamic quantisation — no retraining, no fine-tuning,
+and no change to what the model has learned.
+
+A NOTE ON THIS NOTICE
+---------------------
+MIT asks a redistributor to carry "the above copyright notice". Upstream
+declares `license: mit` on the Hugging Face model card but ships no LICENSE
+file and no copyright line, so there is no notice to carry verbatim. The
+attribution below is our good-faith reconstruction naming the author, not a
+quotation of an upstream notice. If Adam Karvonen would prefer different
+wording or a different year, we will use his.
+
+MIT License
+
+Copyright (c) 2024 Adam Karvonen
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
